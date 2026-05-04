@@ -267,10 +267,12 @@ export default function BuilderPage() {
       if (savedBoardId) {
         await boardsService.saveBoard(savedBoardId, board)
       } else {
-        const summary = await boardsService.createBoard(board)
-        setSavedBoardId(summary.id)
+        const created = await boardsService.createBoard(board)
+        // Save the jsonElement immediately after creating the board
+        await boardsService.saveBoard(created.boardId, board)
+        setSavedBoardId(created.boardId)
         window.localStorage.removeItem(DRAFT_KEY)
-        navigate(`/builder/${summary.id}`, { replace: true })
+        navigate(`/builder/${created.boardId}`, { replace: true })
       }
     } catch {
       setSaveError('Save failed. Please try again.')
@@ -828,14 +830,18 @@ function ActionFields({
 function MediaUpload({ onUrl }: { onUrl: (url: string) => void }) {
   const [uploading, setUploading] = useState(false)
   const [progress, setProgress] = useState(0)
+  const [uploadError, setUploadError] = useState('')
 
   async function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
     if (!file) return
     setUploading(true)
+    setUploadError('')
     try {
       const url = await uploadsService.upload(file, (p) => setProgress(p.percent))
       onUrl(url)
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : 'Upload failed')
     } finally {
       setUploading(false)
       setProgress(0)
@@ -855,6 +861,7 @@ function MediaUpload({ onUrl }: { onUrl: (url: string) => void }) {
           disabled={uploading}
         />
       </div>
+      {uploadError && <p className="text-xs text-red-400">{uploadError}</p>}
     </label>
   )
 }
