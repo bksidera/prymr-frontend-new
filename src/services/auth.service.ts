@@ -13,6 +13,8 @@ interface RegisterRequest {
   firstName: string
   lastName: string
   password: string
+  profileIcon?: string
+  initialProfileIcon?: string
 }
 
 // The backend returns user fields and token at the same level in data.
@@ -51,7 +53,12 @@ export const authService = {
   },
 
   async register(data: RegisterRequest): Promise<LoginResponse> {
-    const res = await apiClient.post<ApiResponse<RawAuthPayload>>('/auth/createUser', data)
+    const placeholder = 'https://prymr-media.s3.amazonaws.com/defaults/avatar.png'
+    const res = await apiClient.post<ApiResponse<RawAuthPayload>>('/auth/createUser', {
+      ...data,
+      profileIcon: data.profileIcon ?? placeholder,
+      initialProfileIcon: data.initialProfileIcon ?? placeholder,
+    })
     return toLoginResponse(res.data.data)
   },
 

@@ -90,7 +90,7 @@ export default function RegisterForm() {
       <Input
         label="Password"
         type="password"
-        placeholder="8+ characters"
+        placeholder="8+ chars, uppercase, number, symbol"
         value={form.password}
         onChange={(e) => set('password', e.target.value)}
         autoComplete="new-password"
