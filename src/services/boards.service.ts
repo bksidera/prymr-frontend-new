@@ -23,10 +23,15 @@ export interface BoardSummary {
 
 export const boardsService = {
   async createBoard(board: BoardSchema): Promise<BoardSummary> {
-    const res = await apiClient.post<ApiResponse<BoardSummary>>('/board/createBoard', {
-      jsonElement: serializeBoard(board),
-      imageUrl: board.elements[0]?.url ?? '',
-    })
+    // imageUrl is a query param; backend requires a valid URL so use a placeholder
+    // when the board has no media elements yet.
+    const imageUrl =
+      board.elements.find((el) => el.url)?.url ??
+      'https://prymr-media.s3.amazonaws.com/defaults/board-placeholder.png'
+    const res = await apiClient.post<ApiResponse<BoardSummary>>(
+      `/board/createBoard?imageUrl=${encodeURIComponent(imageUrl)}`,
+      { jsonElement: serializeBoard(board) },
+    )
     return res.data.data
   },
 
