@@ -53,6 +53,13 @@ export const boardsService = {
     return deserializeBoard(jsonElement)
   },
 
+  async getBoardSummary(boardId: string): Promise<BoardSummary> {
+    const res = await apiClient.get<ApiResponse<BoardSummary>>(
+      `/board/fetchPrivateUserBoardDetails?boardId=${boardId}`,
+    )
+    return res.data.data
+  },
+
   async getPublicBoard(
     boardId: string,
   ): Promise<{ schema: BoardSchema; meta: PublicBoardResponse }> {

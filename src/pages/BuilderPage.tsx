@@ -1,11 +1,14 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { useNavigate, useParams } from 'react-router-dom'
 import { v4 as uuidv4 } from 'uuid'
 import BoardPlayer from '../components/board/BoardPlayer'
 import Button from '../components/ui/Button'
 import Input from '../components/ui/Input'
+import { boardsService } from '../services/boards.service'
+import { uploadsService } from '../services/uploads.service'
 import { authStore } from '../stores/authStore'
 import type { BoardElement, BoardSchema, TappableAction, TappableZone } from '../types/board.types'
-import { createEmptyBoard } from '../utils/boardSchema'
+import { createEmptyBoard, deserializeBoard } from '../utils/boardSchema'
 
 const DRAFT_KEY = 'prymr-builder-draft'
 
@@ -143,11 +146,29 @@ function loadInitialBoard(creatorId: string): BoardSchema {
 }
 
 export default function BuilderPage() {
+  const { boardId: routeBoardId } = useParams<{ boardId: string }>()
+  const navigate = useNavigate()
   const user = authStore((state) => state.user)
   const creatorId = user?.id ?? 'local-creator'
   const [board, setBoard] = useState<BoardSchema>(() => loadInitialBoard(creatorId))
   const [selection, setSelection] = useState<Selection>({ type: 'board' })
-  const [copied, setCopied] = useState(false)
+  const [savedBoardId, setSavedBoardId] = useState<string | null>(routeBoardId ?? null)
+  const [isSaving, setIsSaving] = useState(false)
+  const [isPublishing, setIsPublishing] = useState(false)
+  const [shareUrl, setShareUrl] = useState<string | null>(null)
+  const [saveError, setSaveError] = useState('')
+
+  useEffect(() => {
+    if (!routeBoardId) return
+    boardsService
+      .getBoardSummary(routeBoardId)
+      .then((summary) => {
+        const jsonElement = summary.BoardImages[0]?.jsonElement
+        if (jsonElement) setBoard(deserializeBoard(jsonElement))
+        setSavedBoardId(summary.id)
+      })
+      .catch(() => {})
+  }, [routeBoardId])
 
   const selectedElement = useMemo(
     () =>
@@ -239,14 +260,40 @@ export default function BuilderPage() {
     setSelection({ type: 'board' })
   }
 
-  function saveDraft() {
-    window.localStorage.setItem(DRAFT_KEY, JSON.stringify(board))
-    setCopied(false)
+  async function handleSave() {
+    setIsSaving(true)
+    setSaveError('')
+    try {
+      if (savedBoardId) {
+        await boardsService.saveBoard(savedBoardId, board)
+      } else {
+        const summary = await boardsService.createBoard(board)
+        setSavedBoardId(summary.id)
+        window.localStorage.removeItem(DRAFT_KEY)
+        navigate(`/builder/${summary.id}`, { replace: true })
+      }
+    } catch {
+      setSaveError('Save failed. Please try again.')
+    } finally {
+      setIsSaving(false)
+    }
   }
 
-  async function copyJson() {
-    await navigator.clipboard.writeText(JSON.stringify(board, null, 2))
-    setCopied(true)
+  async function handlePublish() {
+    if (!savedBoardId) {
+      setSaveError('Save your board before publishing.')
+      return
+    }
+    setIsPublishing(true)
+    setSaveError('')
+    try {
+      const url = await boardsService.publishBoard(savedBoardId)
+      setShareUrl(url)
+    } catch {
+      setSaveError('Publish failed. Please try again.')
+    } finally {
+      setIsPublishing(false)
+    }
   }
 
   function handlePreviewTap(x: number, y: number) {
@@ -274,11 +321,35 @@ export default function BuilderPage() {
             </p>
             <h1 className="mt-1 text-xl font-semibold">Compose a board that invites interaction</h1>
           </div>
-          <div className="flex items-center gap-2">
-            <Button variant="ghost" onClick={saveDraft}>
-              Save draft
-            </Button>
-            <Button onClick={copyJson}>{copied ? 'Copied JSON' : 'Copy JSON'}</Button>
+          <div className="flex flex-col items-end gap-1.5">
+            <div className="flex items-center gap-2">
+              <Button variant="ghost" onClick={handleSave} loading={isSaving}>
+                Save
+              </Button>
+              <Button onClick={handlePublish} loading={isPublishing} disabled={!savedBoardId}>
+                Publish
+              </Button>
+            </div>
+            {saveError && <p className="text-xs text-red-400">{saveError}</p>}
+            {shareUrl && (
+              <div className="flex items-center gap-2">
+                <a
+                  href={shareUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="max-w-[200px] truncate text-xs text-teal-300 underline"
+                >
+                  {shareUrl}
+                </a>
+                <button
+                  type="button"
+                  className="text-xs text-zinc-400 hover:text-white"
+                  onClick={() => void navigator.clipboard.writeText(shareUrl)}
+                >
+                  Copy
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </header>
@@ -474,12 +545,15 @@ function Inspector({
         {(selectedElement.type === 'image' ||
           selectedElement.type === 'video' ||
           selectedElement.type === 'gif') && (
-          <Input
-            label="Media URL"
-            value={selectedElement.url ?? ''}
-            onChange={(event) => updateSelectedElement({ url: event.target.value })}
-            placeholder="https://..."
-          />
+          <>
+            <MediaUpload onUrl={(url) => updateSelectedElement({ url })} />
+            <Input
+              label="Or paste URL"
+              value={selectedElement.url ?? ''}
+              onChange={(event) => updateSelectedElement({ url: event.target.value })}
+              placeholder="https://..."
+            />
+          </>
         )}
 
         {selectedElement.type === 'text' && (
@@ -748,6 +822,40 @@ function ActionFields({
     <p className="rounded-lg bg-black/30 p-3 text-sm text-zinc-400">
       Follow action placeholder for MVP validation.
     </p>
+  )
+}
+
+function MediaUpload({ onUrl }: { onUrl: (url: string) => void }) {
+  const [uploading, setUploading] = useState(false)
+  const [progress, setProgress] = useState(0)
+
+  async function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    setUploading(true)
+    try {
+      const url = await uploadsService.upload(file, (p) => setProgress(p.percent))
+      onUrl(url)
+    } finally {
+      setUploading(false)
+      setProgress(0)
+    }
+  }
+
+  return (
+    <label className="flex flex-col gap-1 text-sm text-zinc-300">
+      Upload file
+      <div className="relative rounded-lg border border-dashed border-zinc-700 bg-zinc-900 py-3 text-center text-xs text-zinc-500 hover:border-zinc-500">
+        {uploading ? `Uploading ${Math.round(progress)}%…` : 'Click to upload image / video'}
+        <input
+          type="file"
+          accept="image/*,video/*"
+          className="absolute inset-0 cursor-pointer opacity-0"
+          onChange={handleFile}
+          disabled={uploading}
+        />
+      </div>
+    </label>
   )
 }
 
