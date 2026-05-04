@@ -45,8 +45,9 @@ function toLoginResponse(raw: RawAuthPayload): LoginResponse {
 
 export const authService = {
   async login(identifier: string, password: string): Promise<LoginResponse> {
+    // passport-local expects the field named 'username' (lowercase) by default
     const res = await apiClient.post<ApiResponse<RawAuthPayload>>('/auth/loginUser', {
-      userName: identifier,
+      username: identifier,
       password,
     })
     return toLoginResponse(res.data.data)
