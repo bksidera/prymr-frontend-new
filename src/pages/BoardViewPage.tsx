@@ -1,10 +1,14 @@
 import { useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { usePublicBoard, useReactionPins } from '../hooks/useBoard'
+import { useQueryClient } from '@tanstack/react-query'
 import BoardPlayer from '../components/board/BoardPlayer'
 import ReactionPin from '../components/board/ReactionPin'
 import ReactionComposer, { type ComposerMode } from '../components/board/ReactionComposer'
 import ReactionDetail from '../components/board/ReactionDetail'
+import CreatorOverlay from '../components/board/CreatorOverlay'
+import ReactionsToggle from '../components/board/ReactionsToggle'
+import PaymentSuccessBurst from '../components/board/PaymentSuccessBurst'
 import type { TappableZone } from '../types/board.types'
 
 interface ComposerState {
@@ -12,16 +16,27 @@ interface ComposerState {
   tappable?: TappableZone
   tapX: number
   tapY: number
+  screenX: number
+  screenY: number
+}
+
+interface BurstState {
+  trigger: number
+  screenX: number
+  screenY: number
 }
 
 export default function BoardViewPage() {
   const { boardId } = useParams<{ boardId: string }>()
+  const queryClient = useQueryClient()
   const { data, isLoading, error } = usePublicBoard(boardId)
   const boardImageId = data?.meta.images[0]?.id ?? ''
   const { data: pins } = useReactionPins(boardImageId || undefined)
 
   const [composer, setComposer] = useState<ComposerState | null>(null)
   const [selectedPinId, setSelectedPinId] = useState<string | null>(null)
+  const [burst, setBurst] = useState<BurstState>({ trigger: 0, screenX: 0, screenY: 0 })
+  const [pinsVisible, setPinsVisible] = useState(true)
 
   if (isLoading) {
     return (
@@ -46,70 +61,85 @@ export default function BoardViewPage() {
 
   function handleTappableTap(tappable: TappableZone) {
     if (tappable.action.type === 'appreciation') {
+      const screenX = window.innerWidth / 2
+      const screenY = window.innerHeight / 2
       setComposer({
         mode: 'appreciation',
         tappable,
         tapX: tappable.x + tappable.w / 2,
         tapY: tappable.y + tappable.h / 2,
+        screenX,
+        screenY,
       })
     }
-    // follow action: no-op until Phase 4
+    if (tappable.action.type === 'purchase') {
+      alert('Coming soon — for-sale items launch in v2')
+    }
   }
 
-  function handleBoardTap(x: number, y: number) {
-    setComposer({ mode: 'freeform', tapX: x, tapY: y })
+  function handleBoardTap(x: number, y: number, screenX: number, screenY: number) {
+    setComposer({ mode: 'freeform', tapX: x, tapY: y, screenX, screenY })
+  }
+
+  function handleComposerSuccess(didPay: boolean) {
+    const c = composer
+    setComposer(null)
+    if (c && didPay) {
+      setBurst({ trigger: Date.now(), screenX: c.screenX, screenY: c.screenY })
+    }
+    // Refresh pin list so the new pin appears
+    if (boardImageId) {
+      queryClient.invalidateQueries({ queryKey: ['reactionPins', boardImageId] })
+    }
   }
 
   return (
-    <div className="flex min-h-screen flex-col bg-black">
-      {/* Creator header */}
-      <header className="flex items-center gap-3 px-4 py-3">
-        {meta.user.icon ? (
-          <img
-            src={meta.user.icon}
-            alt={meta.user.name}
-            className="h-8 w-8 rounded-full object-cover"
-          />
-        ) : (
-          <div className="flex h-8 w-8 items-center justify-center rounded-full bg-zinc-700 text-xs font-medium text-white">
-            {meta.user.name.charAt(0).toUpperCase()}
-          </div>
-        )}
-        <span className="text-sm font-medium text-white">{meta.user.name}</span>
-      </header>
-
-      {/* Board */}
-      <main className="flex flex-1 items-center justify-center px-4 pb-4">
-        <div className="w-full max-w-sm">
+    <div className="flex min-h-screen items-center justify-center bg-black p-4">
+      <div className="relative w-full max-w-sm">
+        <div className="relative overflow-hidden rounded-xl shadow-[0_25px_60px_-12px_rgba(0,0,0,0.7)] ring-1 ring-white/10">
           <BoardPlayer
             schema={schema}
             onTappableTap={handleTappableTap}
             onBoardTap={handleBoardTap}
           >
-            {/* Reaction pins rendered inside the board container */}
-            {pins?.map((pin) => (
-              <ReactionPin key={pin.id} pin={pin} onClick={(id) => setSelectedPinId(id)} />
-            ))}
+            {pinsVisible &&
+              pins?.map((pin) => (
+                <ReactionPin key={pin.id} pin={pin} onClick={(id) => setSelectedPinId(id)} />
+              ))}
           </BoardPlayer>
-        </div>
-      </main>
 
-      {/* Reaction composer overlay */}
+          <CreatorOverlay
+            name={meta.user.name}
+            icon={meta.user.icon}
+            username={meta.user.username}
+          />
+
+          {boardId && <ReactionsToggle boardId={boardId} onChange={setPinsVisible} />}
+        </div>
+      </div>
+
       {composer && (
         <ReactionComposer
           mode={composer.mode}
           tappable={composer.tappable}
           tapX={composer.tapX}
           tapY={composer.tapY}
+          screenX={composer.screenX}
+          screenY={composer.screenY}
           boardImageId={boardImageId}
           boardId={boardId!}
           creatorName={meta.user.name}
           onClose={() => setComposer(null)}
-          onSuccess={() => setComposer(null)}
+          onSuccess={handleComposerSuccess}
         />
       )}
 
-      {/* Reaction detail overlay */}
+      <PaymentSuccessBurst
+        trigger={burst.trigger}
+        screenX={burst.screenX}
+        screenY={burst.screenY}
+      />
+
       {selectedPinId && (
         <ReactionDetail reactionId={selectedPinId} onClose={() => setSelectedPinId(null)} />
       )}

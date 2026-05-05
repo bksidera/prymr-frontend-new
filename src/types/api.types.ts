@@ -22,6 +22,7 @@ export interface ReactionPin {
   normalizedY: number | null
   emoji: string | null
   contentType: string | null
+  hasPayment?: boolean
   user: {
     profileIcon: string | null
     initialProfileIcon: string | null
@@ -72,6 +73,10 @@ export interface PublicBoardImage {
 export interface PublicBoardResponse {
   boardId: string
   createdAt: string
-  user: { name: string; icon: string | null }
+  user: { name: string; icon: string | null; username?: string | null }
   images: PublicBoardImage[]
+}
+
+export interface ReactionPinHasPayment {
+  hasPayment?: boolean
 }

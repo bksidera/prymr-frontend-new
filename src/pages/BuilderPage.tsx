@@ -25,6 +25,7 @@ const actionLabels: Record<TappableAction['type'], string> = {
   switch: 'Switch',
   infoOverlay: 'Info overlay',
   follow: 'Follow',
+  purchase: 'Purchase',
 }
 
 function clamp01(value: number) {

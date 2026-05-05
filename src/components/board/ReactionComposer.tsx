@@ -1,72 +1,117 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
+import { CardElement, Elements, useElements, useStripe } from '@stripe/react-stripe-js'
+import type { Stripe, StripeCardElement } from '@stripe/stripe-js'
+import { loadStripe } from '@stripe/stripe-js'
 import type { TappableZone } from '../../types/board.types'
 import { boardsService } from '../../services/boards.service'
-import Button from '../ui/Button'
+import { paymentsService } from '../../services/payments.service'
 
-const QUICK_AMOUNTS = [1, 3, 5, 10]
-
-// Whether the tap was on an appreciation tappable or anywhere else on the board
 export type ComposerMode = 'appreciation' | 'freeform'
+
+const QUICK_AMOUNTS = [1, 3, 5, 10] as const
+const BUBBLE_W = 320
+const BUBBLE_H_COMPOSE = 220
+const BUBBLE_H_PAY = 280
+const VIEWPORT_PAD = 8
 
 interface Props {
   mode: ComposerMode
   tappable?: TappableZone
+  /** Normalized 0-1 board-space coords for storing the reaction pin */
   tapX: number
   tapY: number
+  /** Screen-space pixels for anchoring the floating bubble */
+  screenX: number
+  screenY: number
   boardImageId: string
   boardId: string
   creatorName: string
   onClose: () => void
-  onSuccess: () => void
+  onSuccess: (didPay: boolean) => void
 }
 
-type Step = 'compose' | 'success'
+let stripePromise: Promise<Stripe | null> | null = null
+function getStripe() {
+  if (!stripePromise) {
+    const key = import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY as string | undefined
+    if (!key) return null
+    stripePromise = loadStripe(key)
+  }
+  return stripePromise
+}
 
-const EMOJI_QUICK = ['❤️', '🔥', '✨', '👏', '😍', '💯']
+export default function ReactionComposer(props: Props) {
+  const stripe = getStripe()
+  if (!stripe) {
+    return <ComposerInner {...props} />
+  }
+  return (
+    <Elements stripe={stripe}>
+      <ComposerInner {...props} />
+    </Elements>
+  )
+}
 
-export default function ReactionComposer({
+function ComposerInner({
   mode,
   tappable,
   tapX,
   tapY,
+  screenX,
+  screenY,
   boardImageId,
+  boardId,
   creatorName,
   onClose,
   onSuccess,
 }: Props) {
-  const suggestedAmount =
+  const stripe = useStripe()
+  const elements = useElements()
+
+  const suggested =
     tappable?.action.type === 'appreciation' ? (tappable.action.suggestedAmount ?? 5) : 5
 
-  const [step, setStep] = useState<Step>('compose')
-  const [contentType, setContentType] = useState<'emoji' | 'text'>('emoji')
-  const [selectedEmoji, setSelectedEmoji] = useState('❤️')
-  const [textContent, setTextContent] = useState('')
-  const [wantsPayment, setWantsPayment] = useState(mode === 'appreciation')
-  const [amount, setAmount] = useState(suggestedAmount)
-  const [showCustom, setShowCustom] = useState(false)
-  const [customInput, setCustomInput] = useState('')
+  const [text, setText] = useState('')
+  const [amount, setAmount] = useState<number | null>(mode === 'appreciation' ? suggested : null)
+  const [step, setStep] = useState<'compose' | 'pay'>('compose')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
+  const cardElementRef = useRef<StripeCardElement | null>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
 
-  const finalAmount = showCustom ? parseFloat(customInput) || suggestedAmount : amount
-  const content = contentType === 'emoji' ? selectedEmoji : textContent
+  useEffect(() => {
+    inputRef.current?.focus()
+  }, [])
 
-  async function handleContinue() {
-    setSubmitting(true)
+  const bubbleHeight = step === 'pay' ? BUBBLE_H_PAY : BUBBLE_H_COMPOSE
+  const position = useMemo(
+    () => clampToViewport(screenX, screenY, BUBBLE_W, bubbleHeight),
+    [screenX, screenY, bubbleHeight],
+  )
+
+  async function handleSend() {
     setError('')
+    if (!text.trim() && amount === null) {
+      setError('Add a message or pick an amount.')
+      return
+    }
+    if (amount !== null) {
+      setStep('pay')
+      return
+    }
+    // Free path
+    setSubmitting(true)
     try {
       await boardsService.addReaction({
         boardImageId,
-        reactionType: contentType,
-        emoji: contentType === 'emoji' ? content : undefined,
-        contentText: contentType === 'text' ? content : undefined,
+        reactionType: 'text',
+        contentText: text.trim() || undefined,
         backgroundCapture: '',
         top: String(tapY),
         left: String(tapX),
       })
-      setStep('success')
-      setTimeout(onSuccess, 1800)
+      onSuccess(false)
     } catch {
       setError('Failed to post reaction. Please try again.')
     } finally {
@@ -74,238 +119,301 @@ export default function ReactionComposer({
     }
   }
 
+  async function handleConfirmPay() {
+    if (!stripe || !elements || amount === null) return
+    setError('')
+    setSubmitting(true)
+    try {
+      const card = cardElementRef.current ?? elements.getElement(CardElement)
+      if (!card) throw new Error('Card element not mounted')
+
+      const pmRes = await stripe.createPaymentMethod({ type: 'card', card })
+      if (pmRes.error) throw new Error(pmRes.error.message ?? 'Card error')
+
+      const intent = await paymentsService.createTipIntent({
+        featureName: 'ReactionTipPayment',
+        boardId,
+        amount,
+        paymentMethodId: pmRes.paymentMethod.id,
+      })
+
+      const confirmRes = await stripe.confirmCardPayment(intent.clientSecret, {
+        payment_method: pmRes.paymentMethod.id,
+      })
+      if (confirmRes.error)
+        throw new Error(confirmRes.error.message ?? 'Payment confirmation failed')
+
+      await boardsService.addReaction({
+        boardImageId,
+        reactionType: 'text',
+        contentText: text.trim() || undefined,
+        backgroundCapture: '',
+        top: String(tapY),
+        left: String(tapX),
+        paymentIntentId: intent.paymentIntentId,
+      })
+
+      onSuccess(true)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Payment failed')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-end justify-center"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose()
-      }}
-    >
-      <div className="absolute inset-0 bg-black/60" />
+    <>
+      {/* Backdrop — tap-outside dismisses */}
+      <div
+        className="fixed inset-0 z-40 bg-black/30"
+        onClick={onClose}
+        onPointerDown={(e) => e.stopPropagation()}
+      />
 
       <AnimatePresence>
         <motion.div
-          key="sheet"
-          className="relative z-10 w-full max-w-sm rounded-t-2xl bg-zinc-900 px-5 pb-8 pt-4"
-          initial={{ y: '100%' }}
-          animate={{ y: 0 }}
-          exit={{ y: '100%' }}
-          transition={{ type: 'spring', damping: 28, stiffness: 300 }}
+          key={step}
+          role="dialog"
+          aria-modal="true"
+          className="fixed z-50 select-none rounded-2xl bg-zinc-900/95 p-3 ring-1 ring-white/10 backdrop-blur"
+          style={{
+            left: position.left,
+            top: position.top,
+            width: BUBBLE_W,
+          }}
+          initial={{ opacity: 0, scale: 0.7 }}
+          animate={{ opacity: 1, scale: 1 }}
+          exit={{ opacity: 0, scale: 0.85 }}
+          transition={{ duration: 0.18, ease: 'easeOut' }}
+          onClick={(e) => e.stopPropagation()}
+          onPointerDown={(e) => e.stopPropagation()}
         >
-          <div className="mx-auto mb-4 h-1 w-10 rounded-full bg-zinc-700" />
-
           {step === 'compose' && (
-            <div className="flex flex-col gap-5">
-              <div>
-                {mode === 'appreciation' ? (
-                  <>
-                    <h2 className="text-base font-semibold text-white">Appreciate this</h2>
-                    <p className="mt-0.5 text-sm text-zinc-400">
-                      Support {creatorName}&apos;s work
-                    </p>
-                  </>
-                ) : (
-                  <>
-                    <h2 className="text-base font-semibold text-white">Leave a reaction</h2>
-                    <p className="mt-0.5 text-sm text-zinc-400">Mark this moment on the board</p>
-                  </>
-                )}
-              </div>
-
-              {mode === 'freeform' && (
-                <div className="flex flex-col gap-3">
-                  <div className="flex gap-2">
-                    {(['emoji', 'text'] as const).map((t) => (
-                      <button
-                        key={t}
-                        type="button"
-                        onClick={() => setContentType(t)}
-                        className={[
-                          'rounded-lg px-3 py-1.5 text-xs font-medium capitalize transition-colors',
-                          contentType === t
-                            ? 'bg-white text-black'
-                            : 'border border-zinc-700 text-zinc-400 hover:bg-zinc-800',
-                        ].join(' ')}
-                      >
-                        {t}
-                      </button>
-                    ))}
-                  </div>
-
-                  {contentType === 'emoji' && (
-                    <div className="flex flex-wrap gap-2">
-                      {EMOJI_QUICK.map((e) => (
-                        <button
-                          key={e}
-                          type="button"
-                          onClick={() => setSelectedEmoji(e)}
-                          className={[
-                            'rounded-lg p-2 text-xl transition-colors',
-                            selectedEmoji === e ? 'bg-zinc-700' : 'hover:bg-zinc-800',
-                          ].join(' ')}
-                        >
-                          {e}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-
-                  {contentType === 'text' && (
-                    <textarea
-                      placeholder="What moved you about this?"
-                      value={textContent}
-                      onChange={(e) => setTextContent(e.target.value)}
-                      rows={2}
-                      className="w-full resize-none rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-white placeholder:text-zinc-600 outline-none focus:ring-2 focus:ring-white/20"
-                    />
-                  )}
-                </div>
-              )}
-
-              {mode === 'appreciation' && (
-                <>
-                  <div className="grid grid-cols-4 gap-2">
-                    {QUICK_AMOUNTS.map((a) => (
-                      <button
-                        key={a}
-                        type="button"
-                        onClick={() => {
-                          setAmount(a)
-                          setShowCustom(false)
-                        }}
-                        className={[
-                          'rounded-lg py-2.5 text-sm font-medium transition-colors',
-                          !showCustom && amount === a
-                            ? 'bg-white text-black'
-                            : 'border border-zinc-700 bg-transparent text-zinc-300 hover:bg-zinc-800',
-                        ].join(' ')}
-                      >
-                        ${a}
-                      </button>
-                    ))}
-                  </div>
-                  {!showCustom ? (
-                    <button
-                      type="button"
-                      onClick={() => setShowCustom(true)}
-                      className="text-sm text-zinc-500 transition-colors hover:text-zinc-300"
-                    >
-                      Enter a different amount
-                    </button>
-                  ) : (
-                    <div className="relative">
-                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-zinc-400">
-                        $
-                      </span>
-                      <input
-                        type="number"
-                        min="1"
-                        step="1"
-                        placeholder="Amount"
-                        value={customInput}
-                        onChange={(e) => setCustomInput(e.target.value)}
-                        className="w-full rounded-lg border border-zinc-700 bg-zinc-800 py-2.5 pl-7 pr-3 text-sm text-white placeholder:text-zinc-600 outline-none focus:ring-2 focus:ring-white/20"
-                        autoFocus
-                      />
-                    </div>
-                  )}
-                  <p className="text-xs text-zinc-600">Payments coming soon</p>
-                </>
-              )}
-
-              {mode === 'freeform' && (
-                <div className="flex flex-col gap-3 rounded-lg border border-zinc-700 p-3">
-                  <button
-                    type="button"
-                    onClick={() => setWantsPayment((p) => !p)}
-                    className="flex w-full items-center justify-between"
-                  >
-                    <div className="text-left">
-                      <p className="text-sm font-medium text-white">Add appreciation</p>
-                      <p className="text-xs text-zinc-500">
-                        Send {creatorName} something for this moment
-                      </p>
-                    </div>
-                    <div
-                      className={[
-                        'h-5 w-9 rounded-full transition-colors',
-                        wantsPayment ? 'bg-white' : 'bg-zinc-700',
-                      ].join(' ')}
-                    >
-                      <div
-                        className={[
-                          'h-5 w-5 rounded-full border-2 border-zinc-700 bg-zinc-900 transition-transform',
-                          wantsPayment ? 'translate-x-4 border-white' : 'translate-x-0',
-                        ].join(' ')}
-                      />
-                    </div>
-                  </button>
-
-                  {wantsPayment && (
-                    <motion.div
-                      initial={{ opacity: 0, height: 0 }}
-                      animate={{ opacity: 1, height: 'auto' }}
-                      className="flex flex-col gap-2 overflow-hidden"
-                    >
-                      <div className="grid grid-cols-4 gap-2">
-                        {QUICK_AMOUNTS.map((a) => (
-                          <button
-                            key={a}
-                            type="button"
-                            onClick={() => {
-                              setAmount(a)
-                              setShowCustom(false)
-                            }}
-                            className={[
-                              'rounded-lg py-2 text-sm font-medium transition-colors',
-                              !showCustom && amount === a
-                                ? 'bg-white text-black'
-                                : 'border border-zinc-700 bg-transparent text-zinc-300 hover:bg-zinc-800',
-                            ].join(' ')}
-                          >
-                            ${a}
-                          </button>
-                        ))}
-                      </div>
-                      <p className="text-xs text-zinc-600">Payments coming soon</p>
-                    </motion.div>
-                  )}
-                </div>
-              )}
-
-              {error && <p className="text-xs text-red-400">{error}</p>}
-
-              <Button onClick={handleContinue} loading={submitting} fullWidth>
-                {wantsPayment ? `Appreciate with $${finalAmount}` : 'Post reaction'}
-              </Button>
-            </div>
+            <ComposeStep
+              text={text}
+              setText={setText}
+              amount={amount}
+              setAmount={setAmount}
+              suggested={suggested}
+              creatorName={creatorName}
+              mode={mode}
+              error={error}
+              submitting={submitting}
+              onSend={handleSend}
+              inputRef={inputRef}
+            />
           )}
 
-          {step === 'success' && (
-            <motion.div
-              className="flex flex-col items-center gap-3 py-4"
-              initial={{ opacity: 0, scale: 0.9 }}
-              animate={{ opacity: 1, scale: 1 }}
-            >
-              <motion.span
-                className="text-4xl"
-                animate={{ scale: [1, 1.3, 1] }}
-                transition={{ duration: 0.5 }}
-              >
-                {mode === 'appreciation' || wantsPayment ? '❤️' : '📍'}
-              </motion.span>
-              <p className="text-base font-semibold text-white">
-                {wantsPayment ? 'Appreciation noted' : 'Reaction posted'}
-              </p>
-              {wantsPayment && (
-                <p className="text-sm text-zinc-500">
-                  Your reaction is live — payments coming soon
-                </p>
-              )}
-            </motion.div>
+          {step === 'pay' && (
+            <PayStep
+              amount={amount ?? suggested}
+              text={text}
+              creatorName={creatorName}
+              error={error}
+              submitting={submitting}
+              onBack={() => setStep('compose')}
+              onConfirm={handleConfirmPay}
+              onCardReady={(el) => {
+                cardElementRef.current = el
+              }}
+            />
           )}
         </motion.div>
       </AnimatePresence>
+    </>
+  )
+}
+
+function ComposeStep({
+  text,
+  setText,
+  amount,
+  setAmount,
+  suggested,
+  creatorName,
+  mode,
+  error,
+  submitting,
+  onSend,
+  inputRef,
+}: {
+  text: string
+  setText: (s: string) => void
+  amount: number | null
+  setAmount: (n: number | null) => void
+  suggested: number
+  creatorName: string
+  mode: ComposerMode
+  error: string
+  submitting: boolean
+  onSend: () => void
+  inputRef: React.RefObject<HTMLInputElement>
+}) {
+  return (
+    <div className="flex flex-col gap-3">
+      <input
+        ref={inputRef}
+        type="text"
+        placeholder="Say something..."
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') onSend()
+        }}
+        className="w-full rounded-lg bg-zinc-800/80 px-3 py-2 text-sm text-white placeholder:text-zinc-500 outline-none ring-1 ring-white/5 focus:ring-white/20"
+      />
+
+      <div className="flex items-center gap-1.5">
+        <span className="text-zinc-400" aria-hidden>
+          $
+        </span>
+        {QUICK_AMOUNTS.map((a) => {
+          const active = amount === a
+          return (
+            <button
+              key={a}
+              type="button"
+              onClick={() => setAmount(active ? null : a)}
+              className={[
+                'flex-1 rounded-full px-2 py-1 text-xs font-medium transition-colors',
+                active
+                  ? 'bg-amber-300 text-black'
+                  : 'bg-zinc-800/70 text-zinc-300 hover:bg-zinc-700',
+              ].join(' ')}
+            >
+              ${a}
+            </button>
+          )
+        })}
+      </div>
+
+      {mode === 'appreciation' && amount === null && (
+        <button
+          type="button"
+          onClick={() => setAmount(suggested)}
+          className="self-start text-xs text-zinc-500 hover:text-zinc-300"
+        >
+          Suggested ${suggested}
+        </button>
+      )}
+
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <MediaButton label="Photo" disabled />
+          <MediaButton label="Video" disabled />
+          <MediaButton label="GIF" disabled />
+        </div>
+        <button
+          type="button"
+          onClick={onSend}
+          disabled={submitting}
+          className="rounded-full bg-white px-3 py-1.5 text-xs font-semibold text-black hover:bg-zinc-100 disabled:opacity-60"
+          title={amount !== null ? `Appreciate ${creatorName} with $${amount}` : 'Post reaction'}
+        >
+          {amount !== null ? `Send $${amount}` : 'Send'}
+        </button>
+      </div>
+
+      {error && <p className="text-xs text-rose-400">{error}</p>}
     </div>
   )
+}
+
+function PayStep({
+  amount,
+  text,
+  creatorName,
+  error,
+  submitting,
+  onBack,
+  onConfirm,
+  onCardReady,
+}: {
+  amount: number
+  text: string
+  creatorName: string
+  error: string
+  submitting: boolean
+  onBack: () => void
+  onConfirm: () => void
+  onCardReady: (el: StripeCardElement) => void
+}) {
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex items-center justify-between">
+        <button
+          type="button"
+          onClick={onBack}
+          className="text-xs text-zinc-400 hover:text-zinc-200"
+        >
+          ← back
+        </button>
+        <span className="text-xs text-zinc-400">
+          ${amount} to {creatorName}
+        </span>
+      </div>
+
+      {text && (
+        <p className="rounded-md bg-zinc-800/60 px-3 py-1.5 text-xs text-zinc-300">{text}</p>
+      )}
+
+      <div className="rounded-lg border border-white/10 bg-zinc-950/60 px-3 py-2.5">
+        <CardElement
+          options={{
+            style: {
+              base: {
+                color: '#ffffff',
+                fontSize: '14px',
+                '::placeholder': { color: '#71717a' },
+              },
+              invalid: { color: '#fb7185' },
+            },
+          }}
+          onReady={(el) => onCardReady(el as StripeCardElement)}
+        />
+      </div>
+
+      <button
+        type="button"
+        onClick={onConfirm}
+        disabled={submitting}
+        className="rounded-full bg-amber-300 px-3 py-2 text-sm font-semibold text-black hover:bg-amber-200 disabled:opacity-60"
+      >
+        {submitting ? 'Processing…' : `Appreciate $${amount}`}
+      </button>
+
+      {error && <p className="text-xs text-rose-400">{error}</p>}
+    </div>
+  )
+}
+
+function MediaButton({ label, disabled }: { label: string; disabled?: boolean }) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      title={disabled ? `${label} attach — coming soon` : label}
+      className="rounded-full bg-zinc-800/70 px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-zinc-400 hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50"
+    >
+      {label}
+    </button>
+  )
+}
+
+function clampToViewport(
+  cx: number,
+  cy: number,
+  w: number,
+  h: number,
+): { left: number; top: number } {
+  const vw = typeof window !== 'undefined' ? window.innerWidth : 360
+  const vh = typeof window !== 'undefined' ? window.innerHeight : 640
+  // Anchor bubble's center near the tap, then shift up so it's "above" the tap point
+  const idealLeft = cx - w / 2
+  const idealTop = cy - h - 16 // sit above the tap by 16px
+  // If above doesn't fit, place below the tap
+  const fitsAbove = idealTop >= VIEWPORT_PAD
+  const top = fitsAbove ? idealTop : Math.min(cy + 16, vh - h - VIEWPORT_PAD)
+  const left = Math.max(VIEWPORT_PAD, Math.min(idealLeft, vw - w - VIEWPORT_PAD))
+  return { left, top: Math.max(VIEWPORT_PAD, top) }
 }

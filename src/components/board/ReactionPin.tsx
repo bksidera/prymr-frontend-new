@@ -29,6 +29,8 @@ export default function ReactionPin({ pin, onClick }: Props) {
   const avatarUrl = pin.user?.profileIcon ?? pin.user?.initialProfileIcon ?? null
   const initials = pin.user?.userName?.charAt(0).toUpperCase() ?? '?'
 
+  const paid = pin.hasPayment === true
+
   return (
     <motion.button
       type="button"
@@ -36,8 +38,13 @@ export default function ReactionPin({ pin, onClick }: Props) {
         position: 'absolute',
         left: toCSSPercent(x),
         top: toCSSPercent(y),
-        transform: 'translate(-50%, -50%)',
+        // Inverse-scale via the BoardPlayer-set CSS var so pins stay
+        // visually constant size regardless of board zoom.
+        transform: 'translate(-50%, -50%) scale(calc(1 / var(--pz-zoom, 1)))',
         zIndex: 900,
+        boxShadow: paid
+          ? '0 0 0 2px rgba(255,210,140,0.85), 0 0 12px rgba(255,200,120,0.5)'
+          : undefined,
       }}
       className="flex h-8 w-8 items-center justify-center rounded-full border-2 border-white shadow-lg overflow-hidden"
       initial={{ scale: 0, opacity: 0 }}
@@ -47,6 +54,7 @@ export default function ReactionPin({ pin, onClick }: Props) {
         e.stopPropagation()
         onClick(pin.id)
       }}
+      onPointerDown={(e) => e.stopPropagation()}
     >
       {avatarUrl ? (
         <img

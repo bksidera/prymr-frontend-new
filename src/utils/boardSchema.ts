@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from 'uuid'
+import { migrateBoardSchema } from '../types/board.types'
 import type { BoardSchema } from '../types/board.types'
 
 export function createEmptyBoard(
@@ -7,7 +8,7 @@ export function createEmptyBoard(
   id: string = uuidv4(),
 ): BoardSchema {
   return {
-    version: '1.0',
+    version: '2',
     id,
     creatorId,
     background: '#000000',
@@ -17,6 +18,7 @@ export function createEmptyBoard(
     metadata: {
       createdAt: new Date().toISOString(),
       boardStatus: 'draft',
+      introState: null,
     },
   }
 }
@@ -27,14 +29,12 @@ export function serializeBoard(board: BoardSchema): string {
 
 export function deserializeBoard(json: string): BoardSchema {
   const parsed: unknown = JSON.parse(json)
-  // Basic version check — future migrations go here
-  if (
-    typeof parsed !== 'object' ||
-    parsed === null ||
-    !('version' in parsed) ||
-    (parsed as { version: unknown }).version !== '1.0'
-  ) {
-    throw new Error('Invalid or unsupported board schema version')
+  if (typeof parsed !== 'object' || parsed === null || !('version' in parsed)) {
+    throw new Error('Invalid board schema')
   }
-  return parsed as BoardSchema
+  const v = (parsed as { version: unknown }).version
+  if (v !== '1.0' && v !== '2') {
+    throw new Error(`Unsupported board schema version: ${String(v)}`)
+  }
+  return migrateBoardSchema(parsed as BoardSchema)
 }

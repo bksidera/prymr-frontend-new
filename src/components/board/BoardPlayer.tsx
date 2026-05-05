@@ -2,6 +2,7 @@ import { useState, useRef } from 'react'
 import type { BoardSchema, TappableZone, TappableAction } from '../../types/board.types'
 import BoardElement from './BoardElement'
 import TappableZoneComponent from './TappableZone'
+import { usePanZoom } from '../../hooks/usePanZoom'
 
 const ASPECT_RATIOS: Record<BoardSchema['aspectRatio'], string> = {
   '9:16': '9 / 16',
@@ -12,12 +13,13 @@ const ASPECT_RATIOS: Record<BoardSchema['aspectRatio'], string> = {
 
 interface Props {
   schema: BoardSchema
-  // Called when a tappable zone is tapped (appreciation, follow)
+  // Called when a tappable zone is tapped (appreciation, follow, purchase)
   onTappableTap?: (tappable: TappableZone) => void
   // Called when the board canvas itself is tapped (free-form reaction placement)
-  // x and y are normalized 0–1 coordinates of the tap point
-  onBoardTap?: (x: number, y: number) => void
-  // Overlay content rendered inside the board container (reaction pins)
+  // x/y are normalized 0–1 board-space coordinates of the tap point;
+  // screenX/screenY are the original screen-space pixels (for bubble anchoring).
+  onBoardTap?: (x: number, y: number, screenX: number, screenY: number) => void
+  // Overlay content rendered inside the transform layer (reaction pins).
   children?: React.ReactNode
 }
 
@@ -33,6 +35,9 @@ export default function BoardPlayer({ schema, onTappableTap, onBoardTap, childre
     null,
   )
   const containerRef = useRef<HTMLDivElement>(null)
+  const tapStart = useRef<{ x: number; y: number } | null>(null)
+  const TAP_SLOP = 6 // px of movement before we treat the gesture as a pan, not a tap
+  const { state: pan, screenToBoard } = usePanZoom(containerRef, schema.metadata.introState ?? null)
 
   const sortedElements = [...schema.elements].sort((a, b) => a.zIndex - b.zIndex)
 
@@ -66,12 +71,20 @@ export default function BoardPlayer({ schema, onTappableTap, onBoardTap, childre
     onTappableTap?.(tappable)
   }
 
-  function handleBoardClick(e: React.MouseEvent<HTMLDivElement>) {
-    if (!onBoardTap || !containerRef.current) return
-    const rect = containerRef.current.getBoundingClientRect()
-    const x = (e.clientX - rect.left) / rect.width
-    const y = (e.clientY - rect.top) / rect.height
-    onBoardTap(Math.max(0, Math.min(1, x)), Math.max(0, Math.min(1, y)))
+  function handlePointerDown(e: React.PointerEvent<HTMLDivElement>) {
+    tapStart.current = { x: e.clientX, y: e.clientY }
+  }
+
+  function handlePointerUp(e: React.PointerEvent<HTMLDivElement>) {
+    const start = tapStart.current
+    tapStart.current = null
+    if (!onBoardTap || !start) return
+    const dx = e.clientX - start.x
+    const dy = e.clientY - start.y
+    if (Math.hypot(dx, dy) > TAP_SLOP) return // it was a pan, not a tap
+    const board = screenToBoard(e.clientX, e.clientY)
+    if (!board) return
+    onBoardTap(board.x, board.y, e.clientX, e.clientY)
   }
 
   return (
@@ -84,20 +97,39 @@ export default function BoardPlayer({ schema, onTappableTap, onBoardTap, childre
         background: schema.background,
         overflow: 'hidden',
         containerType: 'size',
+        touchAction: 'none',
         cursor: onBoardTap ? 'crosshair' : undefined,
+        // Exposed to descendants (e.g. ReactionPin) for inverse-scaling
+        ['--pz-zoom' as string]: pan.zoom,
       }}
-      onClick={handleBoardClick}
+      onPointerDown={handlePointerDown}
+      onPointerUp={handlePointerUp}
     >
-      {sortedElements.map((el) => (
-        <BoardElement key={el.id} element={el} hidden={hiddenIds.has(el.id)} />
-      ))}
+      {/* Transform layer — pan/zoom applies here. Children inside see this as
+          their positioning ancestor; their normalized 0–1 layouts are unaffected. */}
+      <div
+        style={{
+          position: 'absolute',
+          inset: 0,
+          transformOrigin: '0 0',
+          transform: `translate(${pan.tx}px, ${pan.ty}px) scale(${pan.zoom})`,
+          willChange: 'transform',
+        }}
+      >
+        {sortedElements.map((el) => (
+          <BoardElement key={el.id} element={el} hidden={hiddenIds.has(el.id)} />
+        ))}
 
-      {schema.tappables.map((t) => (
-        <TappableZoneComponent key={t.id} tappable={t} onTap={() => handleTappableTap(t)} />
-      ))}
+        {schema.tappables.map((t) => (
+          <TappableZoneComponent key={t.id} tappable={t} onTap={() => handleTappableTap(t)} />
+        ))}
 
-      {/* Reaction pins and other overlays */}
-      {children}
+        {/* Reaction pins live inside the transform layer so they pin to board content,
+            but each pin inverse-scales itself to stay visually constant size. */}
+        <div data-pan-zoom={pan.zoom} style={{ position: 'absolute', inset: 0 }}>
+          {children}
+        </div>
+      </div>
 
       {overlay && (
         <div

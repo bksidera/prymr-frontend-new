@@ -1,9 +1,11 @@
-// Board JSON Schema v1.0
-// This is the contract between builder, API, and player.
+// Board JSON Schema v2
+// Contract between builder, API, and player.
 // All positions are normalized 0–1 floats (never pixels).
 
+export type BoardSchemaVersion = '1.0' | '2'
+
 export interface BoardSchema {
-  version: '1.0'
+  version: BoardSchemaVersion
   id: string
   creatorId: string
   title?: string
@@ -16,7 +18,21 @@ export interface BoardSchema {
     createdAt: string // ISO 8601
     publishedAt?: string
     boardStatus: 'draft' | 'published'
+    /**
+     * Optional intro state set by the creator. Defines initial zoom and
+     * pan position when the board first opens. If null/missing, the
+     * viewer fits the entire board to the viewport (zoom = 1).
+     *
+     * x/y are normalized 0–1 (center point of the intro view).
+     */
+    introState?: IntroState | null
   }
+}
+
+export interface IntroState {
+  zoom: number // 1.0 = fit-to-viewport; max ~4
+  x: number // normalized 0–1 center
+  y: number // normalized 0–1 center
 }
 
 export interface BoardElement {
@@ -84,3 +100,26 @@ export type TappableAction =
       purchaseUrl?: string
     }
   | { type: 'follow' }
+  | { type: 'purchase'; saleItemId: string }
+
+/**
+ * Runtime forward-migration: any board read from the backend that's
+ * still on `version: '1.0'` gets upgraded in place to v2 by adding
+ * `introState: null` (defaults to fit-to-viewport at view time).
+ *
+ * Mutates and returns the same object.
+ */
+export function migrateBoardSchema(schema: BoardSchema): BoardSchema {
+  if (schema.version === '2') return schema
+  if (!schema.metadata) {
+    schema.metadata = {
+      createdAt: new Date().toISOString(),
+      boardStatus: 'draft',
+      introState: null,
+    }
+  } else if (schema.metadata.introState === undefined) {
+    schema.metadata.introState = null
+  }
+  schema.version = '2'
+  return schema
+}
