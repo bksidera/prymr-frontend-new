@@ -154,6 +154,7 @@ export default function BuilderPage() {
   const [board, setBoard] = useState<BoardSchema>(() => loadInitialBoard(creatorId))
   const [selection, setSelection] = useState<Selection>({ type: 'board' })
   const [savedBoardId, setSavedBoardId] = useState<string | null>(routeBoardId ?? null)
+  const [savedBoardImageId, setSavedBoardImageId] = useState<string | null>(null)
   const [isSaving, setIsSaving] = useState(false)
   const [isPublishing, setIsPublishing] = useState(false)
   const [shareUrl, setShareUrl] = useState<string | null>(null)
@@ -167,6 +168,8 @@ export default function BuilderPage() {
         const jsonElement = summary.BoardImages[0]?.jsonElement
         if (jsonElement) setBoard(deserializeBoard(jsonElement))
         setSavedBoardId(summary.id)
+        const imageId = summary.BoardImages[0]?.id
+        if (imageId) setSavedBoardImageId(imageId)
       })
       .catch(() => {})
   }, [routeBoardId])
@@ -265,35 +268,35 @@ export default function BuilderPage() {
     setIsSaving(true)
     setSaveError('')
     try {
-      if (savedBoardId) {
-        await boardsService.saveBoard(savedBoardId, board)
-      } else {
+      let imageId = savedBoardImageId
+      if (!savedBoardId || !imageId) {
         const created = await boardsService.createBoard(board)
-        // Save the jsonElement immediately after creating the board
-        await boardsService.saveBoard(created.boardId, board)
         setSavedBoardId(created.boardId)
+        setSavedBoardImageId(created.boardImageId)
+        imageId = created.boardImageId
         window.localStorage.removeItem(DRAFT_KEY)
         navigate(`/builder/${created.boardId}`, { replace: true })
       }
-    } catch {
-      setSaveError('Save failed. Please try again.')
+      await boardsService.saveBoard(imageId, board)
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : String(err))
     } finally {
       setIsSaving(false)
     }
   }
 
   async function handlePublish() {
-    if (!savedBoardId) {
+    if (!savedBoardId || !savedBoardImageId) {
       setSaveError('Save your board before publishing.')
       return
     }
     setIsPublishing(true)
     setSaveError('')
     try {
-      const url = await boardsService.publishBoard(savedBoardId)
+      const url = await boardsService.publishBoard(savedBoardId, savedBoardImageId)
       setShareUrl(url)
-    } catch {
-      setSaveError('Publish failed. Please try again.')
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : String(err))
     } finally {
       setIsPublishing(false)
     }
@@ -329,7 +332,7 @@ export default function BuilderPage() {
               <Button variant="ghost" onClick={handleSave} loading={isSaving}>
                 Save
               </Button>
-              <Button onClick={handlePublish} loading={isPublishing} disabled={!savedBoardId}>
+              <Button onClick={handlePublish} loading={isPublishing} disabled={!savedBoardImageId}>
                 Publish
               </Button>
             </div>

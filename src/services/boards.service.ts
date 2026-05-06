@@ -32,51 +32,57 @@ export const boardsService = {
     // when the board has no media elements yet.
     const imageUrl =
       board.elements.find((el) => el.url)?.url ??
-      'https://prymr-media.s3.amazonaws.com/defaults/board-placeholder.png'
-    const res = await apiClient.post<ApiResponse<CreateBoardResult>>(
+      'https://prymr-media.s3.us-east-1.amazonaws.com/defaults/board-placeholder.png'
+    const res = await apiClient.post<ApiResponse<{ data: CreateBoardResult }>>(
       `/board/createBoard?imageUrl=${encodeURIComponent(imageUrl)}`,
       {},
     )
-    return res.data.data
+    return res.data.data.data
   },
 
-  async saveBoard(boardId: string, board: BoardSchema): Promise<void> {
-    await apiClient.put(`/board/updateBoardImage`, {
-      boardId,
+  async saveBoard(boardImageId: string, board: BoardSchema): Promise<void> {
+    await apiClient.put('/board/saveBoardSchema', {
+      boardImageId,
       jsonElement: serializeBoard(board),
     })
   },
 
-  async publishBoard(boardId: string): Promise<string> {
-    const res = await apiClient.post<ApiResponse<{ shareUrl: string }>>('/board/publishBoard', {
-      boardId,
+  async publishBoard(boardId: string, boardImageId: string): Promise<string> {
+    const collections = await this.fetchMyCollections()
+    const collectionId = collections[0]?.id
+    if (!collectionId) throw new Error('No collection available to publish into')
+    await apiClient.post('/board/publishBoard', {
+      boardImageId,
+      collectionId,
+      isPrivateBoard: false,
+      boardStatus: 'published',
     })
-    return res.data.data.shareUrl
+    return `${window.location.origin}/b/${boardId}`
   },
 
   async getBoard(boardId: string): Promise<BoardSchema> {
-    const res = await apiClient.get<ApiResponse<BoardSummary>>(
+    const res = await apiClient.get<ApiResponse<{ data: BoardSummary }>>(
       `/board/fetchPrivateUserBoardDetails?boardId=${boardId}`,
     )
-    const jsonElement = res.data.data.BoardImages[0]?.jsonElement
+    const jsonElement = res.data.data.data.BoardImages[0]?.jsonElement
     if (!jsonElement) throw new Error('Board has no content')
     return deserializeBoard(jsonElement)
   },
 
   async getBoardSummary(boardId: string): Promise<BoardSummary> {
-    const res = await apiClient.get<ApiResponse<BoardSummary>>(
+    const res = await apiClient.get<ApiResponse<{ data: BoardSummary }>>(
       `/board/fetchPrivateUserBoardDetails?boardId=${boardId}`,
     )
-    return res.data.data
+    return res.data.data.data
   },
 
   async getPublicBoard(
     boardId: string,
   ): Promise<{ schema: BoardSchema; meta: PublicBoardResponse }> {
-    const res = await apiClient.get<ApiResponse<PublicBoardResponse>>(
+    const res = await apiClient.get<ApiResponse<{ data: PublicBoardResponse }>>(
       `/board/fetchPublicUserBoardDetails?boardId=${boardId}`,
     )
-    const meta = res.data.data
+    const meta = res.data.data.data
     const jsonElement = meta.images[0]?.jsonElement
     if (!jsonElement) throw new Error('Board has no content')
     return { schema: deserializeBoard(jsonElement), meta }
@@ -111,27 +117,11 @@ export const boardsService = {
     return res.data.data.data
   },
 
-  async saveBoardSchema(boardImageId: string, schema: BoardSchema): Promise<void> {
-    await apiClient.put('/board/saveBoardSchema', {
-      boardImageId,
-      jsonElement: serializeBoard(schema),
-    })
-  },
-
   async fetchMyCollections(): Promise<Array<{ id: string; collectionName: string }>> {
     const res = await apiClient.get<
       ApiResponse<{ data: Array<{ id: string; collectionName: string }> }>
     >('/board/fetchMyCollections')
     return res.data.data.data
-  },
-
-  async publishBoardFull(boardImageId: string, collectionId: string): Promise<void> {
-    await apiClient.post('/board/publishBoard', {
-      boardImageId,
-      collectionId,
-      isPrivateBoard: false,
-      boardStatus: 'published',
-    })
   },
 
   async getMyBoards(page = 1, pageSize = 10): Promise<PaginatedData<BoardSummary>> {
